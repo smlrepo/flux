@@ -14,7 +14,7 @@ var (
 )
 
 func init() {
-	staticResultID.DecodeFromString("1")
+	staticResultID = platformtesting.MustIDFromString("ca5cadab1ebea575")
 }
 
 func GetProxyQueryServiceBridge() flux.ProxyQueryServiceBridge {
