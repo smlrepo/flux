@@ -7,6 +7,7 @@ import (
 	"github.com/influxdata/flux/control"
 	"github.com/influxdata/flux/functions"
 	"github.com/influxdata/platform"
+	platformtesting "github.com/influxdata/platform/testing"
 )
 
 var (
