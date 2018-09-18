@@ -6,5 +6,9 @@ import (
 )
 
 func RandomProcedureID() plan.ProcedureID {
-	return plan.ProcedureID(uuid.NewV4())
+	id, err := uuid.NewV4()
+	if err != nil {
+		panic(err)
+	}
+	return plan.ProcedureID(id)
 }

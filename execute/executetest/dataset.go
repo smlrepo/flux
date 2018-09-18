@@ -10,7 +10,11 @@ import (
 )
 
 func RandomDatasetID() execute.DatasetID {
-	return execute.DatasetID(uuid.NewV4())
+	id, err := uuid.NewV4()
+	if err != nil {
+		panic(err)
+	}
+	return execute.DatasetID(id)
 }
 
 type Dataset struct {
