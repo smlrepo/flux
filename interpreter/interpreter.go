@@ -177,6 +177,9 @@ func (itrp *Interpreter) doExpression(expr semantic.Expression, scope *Scope) (v
 		if err != nil {
 			return nil, err
 		}
+		if typ := obj.Type().Kind(); typ != semantic.Object {
+			return nil, fmt.Errorf("cannot access property %q on value of type %s", e.Property, typ)
+		}
 		v, ok := obj.Object().Get(e.Property)
 		if !ok {
 			return nil, fmt.Errorf("object has no property %q", e.Property)
@@ -1069,8 +1072,8 @@ func (a *arguments) GetRequiredArray(name string, t semantic.Kind) (values.Array
 		return nil, err
 	}
 	arr := v.Array()
-	if arr.Type().ElementType() != t {
-		return nil, fmt.Errorf("keyword argument %q should be of an array of type %v, but got an array of type %v", name, t, arr.Type())
+	if arr.Type().ElementType().Kind() != t {
+		return nil, fmt.Errorf("keyword argument %q should be of an array of type %v, but got an array of type %v", name, t, arr.Type().ElementType().Kind())
 	}
 	return arr, nil
 }
