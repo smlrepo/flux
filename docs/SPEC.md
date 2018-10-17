@@ -1198,6 +1198,22 @@ Example:
     from(bucket:"telegraf/autogen")
     from(bucketID:"0261d8287f4d6000")
 
+#### Buckets
+
+Buckets is a type of data source that retrieves a list of buckets that the caller is authorized to access.  
+It takes no input parameters and produces an output table with the following columns: 
+
+* name (string): the name of the bucket
+* id (string): the internal ID of the bucket
+* organization (string): the organization this bucket belongs to
+* organizationID (string): the internal ID of the organization
+* retentionPolicy (string): the name of the retention policy, if present
+* retentionPeriod (duration): the duration of time for which data is held in this bucket
+
+Example: 
+
+    buckets() |> filter(fn: (r) => r.organization == "my-org") 
+
 #### Yield
 
 Yield indicates that the stream received by the yield operation should be delivered as a result of the query.
@@ -2203,9 +2219,7 @@ Union concatenates two or more input streams into a single output stream.  In ta
 schema and group keys, contents of the tables will be concatenated in the output stream.  The output schemas of 
 the Union operation shall be the union of all input schemas.
 
-Note that while the tables in the stream produced by Union will be ordered, the rows within those tables
-may appear in any order, due to Flux's parallel execution model. The output of Union may be piped through
-a Sort function to address this, if desired.
+Union does not preserve the sort order of the rows within tables. A sort operation may be added if a specific sort order is needed.
 
 Union has the following properties:
 * `tables` a list of streams
