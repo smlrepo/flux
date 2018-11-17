@@ -304,6 +304,45 @@ func (e *MemberExpression) UnmarshalJSON(data []byte) error {
 
 	return nil
 }
+func (e *IndexExpression) MarshalJSON() ([]byte, error) {
+	type Alias IndexExpression
+	raw := struct {
+		Type string `json:"type"`
+		*Alias
+	}{
+		Type:  e.Type(),
+		Alias: (*Alias)(e),
+	}
+	return json.Marshal(raw)
+}
+func (e *IndexExpression) UnmarshalJSON(data []byte) error {
+	type Alias IndexExpression
+	raw := struct {
+		*Alias
+		Array json.RawMessage `json:"array"`
+		Index json.RawMessage `json:"index"`
+	}{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Alias != nil {
+		*e = *(*IndexExpression)(raw.Alias)
+	}
+
+	array, err := unmarshalExpression(raw.Array)
+	if err != nil {
+		return err
+	}
+	e.Array = array
+
+	index, err := unmarshalExpression(raw.Index)
+	if err != nil {
+		return err
+	}
+	e.Index = index
+
+	return nil
+}
 func (e *ArrowFunctionExpression) MarshalJSON() ([]byte, error) {
 	type Alias ArrowFunctionExpression
 	raw := struct {
@@ -784,20 +823,6 @@ func unmarshalExpression(msg json.RawMessage) (Expression, error) {
 	}
 	return e, nil
 }
-func unmarshalLiteral(msg json.RawMessage) (Literal, error) {
-	if checkNullMsg(msg) {
-		return nil, nil
-	}
-	n, err := unmarshalNode(msg)
-	if err != nil {
-		return nil, err
-	}
-	e, ok := n.(Literal)
-	if !ok {
-		return nil, fmt.Errorf("node %q is not a literal", n.Type())
-	}
-	return e, nil
-}
 func unmarshalNode(msg json.RawMessage) (Node, error) {
 	if checkNullMsg(msg) {
 		return nil, nil
@@ -834,6 +859,8 @@ func unmarshalNode(msg json.RawMessage) (Node, error) {
 		node = new(PipeExpression)
 	case "MemberExpression":
 		node = new(MemberExpression)
+	case "IndexExpression":
+		node = new(IndexExpression)
 	case "BinaryExpression":
 		node = new(BinaryExpression)
 	case "UnaryExpression":

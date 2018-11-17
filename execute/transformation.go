@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/influxdata/flux"
+	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/plan"
 )
 
@@ -27,9 +28,8 @@ type Administration interface {
 
 	ResolveTime(qt flux.Time) Time
 	StreamContext() StreamContext
-	Allocator() *Allocator
+	Allocator() *memory.Allocator
 	Parents() []DatasetID
-	ConvertID(plan.ProcedureID) DatasetID
 
 	Dependencies() Dependencies
 }
@@ -39,10 +39,11 @@ type Administration interface {
 type Dependencies map[string]interface{}
 
 type CreateTransformation func(id DatasetID, mode AccumulationMode, spec plan.ProcedureSpec, a Administration) (Transformation, Dataset, error)
+type CreateNewPlannerTransformation func(id DatasetID, mode AccumulationMode, spec plan.ProcedureSpec, a Administration) (Transformation, Dataset, error)
 
-var procedureToTransformation = make(map[plan.ProcedureKind]CreateTransformation)
+var procedureToTransformation = make(map[plan.ProcedureKind]CreateNewPlannerTransformation)
 
-func RegisterTransformation(k plan.ProcedureKind, c CreateTransformation) {
+func RegisterTransformation(k plan.ProcedureKind, c CreateNewPlannerTransformation) {
 	if procedureToTransformation[k] != nil {
 		panic(fmt.Errorf("duplicate registration for transformation with procedure kind %v", k))
 	}

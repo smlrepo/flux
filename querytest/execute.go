@@ -7,7 +7,7 @@ import (
 
 	"github.com/influxdata/flux"
 	"github.com/influxdata/flux/control"
-	"github.com/influxdata/flux/functions"
+	"github.com/influxdata/flux/functions/inputs"
 )
 
 type Querier struct {
@@ -20,7 +20,7 @@ func (q *Querier) Query(ctx context.Context, w io.Writer, c flux.Compiler, d flu
 		return 0, err
 	}
 	results := flux.NewResultIteratorFromQuery(query)
-	defer results.Cancel()
+	defer results.Release()
 
 	encoder := d.Encoder()
 	return encoder.Encode(w, results)
@@ -41,9 +41,19 @@ func NewQuerier() *Querier {
 
 func ReplaceFromSpec(q *flux.Spec, csvSrc string) {
 	for _, op := range q.Operations {
-		if op.Spec.Kind() == functions.FromKind {
-			op.Spec = &functions.FromCSVOpSpec{
+		if op.Spec.Kind() == inputs.FromKind {
+			op.Spec = &inputs.FromCSVOpSpec{
 				File: csvSrc,
+			}
+		}
+	}
+}
+
+func ReplaceFromWithFromInfluxJSONSpec(q *flux.Spec, jsonSrc string) {
+	for _, op := range q.Operations {
+		if op.Spec.Kind() == inputs.FromKind {
+			op.Spec = &inputs.FromInfluxJSONOpSpec{
+				File: jsonSrc,
 			}
 		}
 	}

@@ -25,16 +25,19 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/influxdata/flux"
 	"github.com/influxdata/flux/execute"
+	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/plan"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Controller provides a central location to manage all incoming queries.
@@ -47,13 +50,17 @@ type Controller struct {
 	queryDone     chan *Query
 	cancelRequest chan QueryID
 
+	shutdownCtx context.Context
+	shutdown    func()
+	done        chan struct{}
+
 	metrics   *controllerMetrics
 	labelKeys []string
 
 	verbose bool
 
 	lplanner plan.LogicalPlanner
-	pplanner plan.Planner
+	pplanner plan.PhysicalPlanner
 	executor execute.Executor
 	logger   *zap.Logger
 
@@ -66,7 +73,8 @@ type Config struct {
 	ConcurrencyQuota     int
 	MemoryBytesQuota     int64
 	ExecutorDependencies execute.Dependencies
-	PlannerOptions       []plan.Option
+	PPlannerOptions      []plan.PhysicalOption
+	LPlannerOptions      []plan.LogicalOption
 	Logger               *zap.Logger
 	Verbose              bool
 	// MetricLabelKeys is a list of labels to add to the metrics produced by the controller.
@@ -87,17 +95,19 @@ func New(c Config) *Controller {
 		queries:              make(map[QueryID]*Query),
 		queryDone:            make(chan *Query),
 		cancelRequest:        make(chan QueryID),
+		done:                 make(chan struct{}),
 		maxConcurrency:       c.ConcurrencyQuota,
 		availableConcurrency: c.ConcurrencyQuota,
 		availableMemory:      c.MemoryBytesQuota,
-		lplanner:             plan.NewLogicalPlanner(),
-		pplanner:             plan.NewPlanner(c.PlannerOptions...),
+		lplanner:             plan.NewLogicalPlanner(c.LPlannerOptions...),
+		pplanner:             plan.NewPhysicalPlanner(c.PPlannerOptions...),
 		executor:             execute.NewExecutor(c.ExecutorDependencies, logger),
 		logger:               logger,
 		verbose:              c.Verbose,
 		metrics:              newControllerMetrics(c.MetricLabelKeys),
 		labelKeys:            c.MetricLabelKeys,
 	}
+	ctrl.shutdownCtx, ctrl.shutdown = context.WithCancel(context.Background())
 	go ctrl.run()
 	return ctrl
 }
@@ -107,11 +117,11 @@ func New(c Config) *Controller {
 func (c *Controller) Query(ctx context.Context, compiler flux.Compiler) (flux.Query, error) {
 	q := c.createQuery(ctx, compiler.CompilerType())
 	if err := c.compileQuery(q, compiler); err != nil {
-		q.parentSpan.Finish()
+		q.transitionTo(Errored)
 		return nil, err
 	}
 	if err := c.enqueueQuery(q); err != nil {
-		q.parentSpan.Finish()
+		q.transitionTo(Errored)
 		return nil, err
 	}
 	return q, nil
@@ -165,7 +175,7 @@ func (c *Controller) compileQuery(q *Query, compiler flux.Compiler) error {
 	if !q.tryCompile() {
 		return errors.New("failed to transition query to compiling state")
 	}
-	spec, err := compiler.Compile(q.compilingCtx)
+	spec, err := compiler.Compile(q.currentCtx)
 	if err != nil {
 		return errors.Wrap(err, "failed to compile query")
 	}
@@ -188,15 +198,16 @@ func (c *Controller) enqueueQuery(q *Query) error {
 		return errors.New("failed to transition query to queueing state")
 	}
 	if err := q.spec.Validate(); err != nil {
-		q.queueSpan.Finish()
 		return errors.Wrap(err, "invalid query")
 	}
+
 	// Add query to the queue
 	select {
 	case c.newQueries <- q:
 		return nil
+	case <-c.shutdownCtx.Done():
+		return fmt.Errorf("query controller shutdown")
 	case <-q.parentCtx.Done():
-		q.queueSpan.Finish()
 		return q.parentCtx.Err()
 	}
 }
@@ -223,7 +234,26 @@ func (c *Controller) Queries() []*Query {
 	return queries
 }
 
+// Shutdown will signal to the Controller that it should not accept any
+// new queries and that it should finish executing any existing queries.
+// This will return once the Controller's run loop has been exited and all
+// queries have been finished or until the Context has been canceled.
+func (c *Controller) Shutdown(ctx context.Context) error {
+	// Initiate the shutdown procedure by signaling to the run thread.
+	c.shutdown()
+
+	// Wait for the run loop to exit.
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (c *Controller) run() {
+	defer close(c.done)
+
 	pq := newPriorityQueue()
 	for {
 		select {
@@ -245,6 +275,46 @@ func (c *Controller) run() {
 			q := c.queries[id]
 			c.queriesMu.RUnlock()
 			q.Cancel()
+		// Check if we have been signaled to shutdown.
+		case <-c.shutdownCtx.Done():
+			// We have been signaled to shutdown so drain the queues
+			// and exit the for loop.
+			c.drain(pq)
+			return
+		}
+
+		// Peek at head of priority queue
+		q := pq.Peek()
+		if q != nil {
+			pop, err := c.processQuery(q)
+			if pop {
+				pq.Pop()
+			}
+			if err != nil {
+				go q.setErr(err)
+			}
+		}
+	}
+}
+
+// drain will continue processing queries from the priority queue and
+// processing done queries.
+func (c *Controller) drain(pq *PriorityQueue) {
+	for {
+		c.queriesMu.RLock()
+		if len(c.queries) == 0 {
+			c.queriesMu.RUnlock()
+			return
+		}
+		c.queriesMu.RUnlock()
+
+		select {
+		// Wait for resources to free
+		case q := <-c.queryDone:
+			c.free(q)
+			c.queriesMu.Lock()
+			delete(c.queries, q.id)
+			c.queriesMu.Unlock()
 		}
 
 		// Peek at head of priority queue
@@ -277,6 +347,10 @@ func (c *Controller) processQuery(q *Query) (pop bool, err error) {
 			default:
 				err = fmt.Errorf("panic: %s", e)
 			}
+			if entry := c.logger.Check(zapcore.InfoLevel, "Controller panic"); entry != nil {
+				entry.Stack = string(debug.Stack())
+				entry.Write(zap.Error(err))
+			}
 		}
 	}()
 
@@ -290,7 +364,7 @@ func (c *Controller) processQuery(q *Query) (pop bool, err error) {
 			log.Println("logical plan", plan.Formatted(lp))
 		}
 
-		p, err := c.pplanner.Plan(lp, nil)
+		p, err := c.pplanner.Plan(lp)
 		if err != nil {
 			return true, errors.Wrap(err, "failed to create physical plan")
 		}
@@ -317,8 +391,9 @@ func (c *Controller) processQuery(q *Query) (pop bool, err error) {
 		if !q.tryExec() {
 			return true, errors.New("failed to transition query into executing state")
 		}
-		q.alloc = new(execute.Allocator)
-		r, err := c.executor.Execute(q.executeCtx, q.plan, q.alloc)
+		q.alloc = new(memory.Allocator)
+		// TODO: pass the plan to the executor here
+		r, err := c.executor.Execute(q.currentCtx, q.plan, q.alloc)
 		if err != nil {
 			return true, errors.Wrap(err, "failed to execute query")
 		}
@@ -372,31 +447,21 @@ type Query struct {
 
 	ready chan map[string]flux.Result
 
-	mu       sync.Mutex
-	state    State
-	cancel   func()
-	canceled bool
+	mu     sync.Mutex
+	state  State
+	cancel func()
 
-	parentCtx,
-	compilingCtx,
-	queueCtx,
-	planCtx,
-	requeueCtx,
-	executeCtx context.Context
-
-	parentSpan,
-	compileSpan,
-	queueSpan,
-	planSpan,
-	requeueSpan,
-	executeSpan *span
+	parentCtx, currentCtx   context.Context
+	parentSpan, currentSpan *span
+	stats                   flux.Statistics
 
 	plan *plan.PlanSpec
 
+	done        sync.Once
 	concurrency int
 	memory      int64
 
-	alloc *execute.Allocator
+	alloc *memory.Allocator
 }
 
 // ID reports an ephemeral unique ID for the query.
@@ -417,22 +482,12 @@ func (q *Query) Concurrency() int {
 func (q *Query) Cancel() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.canceled {
-		// We have already been canceled
-		return
-	}
-	q.canceled = true
 
 	// call cancel func
 	q.cancel()
 
-	// Finish the query immediately.
-	// This allows for receiving from the Ready channel in the same goroutine
-	// that has called defer q.Done()
-	q.finish()
-
-	if q.state != Errored {
-		q.state = Canceled
+	if q.state != Errored && q.state != Canceled {
+		q.transitionTo(Canceled)
 	}
 }
 
@@ -443,45 +498,24 @@ func (q *Query) Ready() <-chan map[string]flux.Result {
 	return q.ready
 }
 
-// finish informs the controller and the Ready channel that the query is finished.
-func (q *Query) finish() {
-	switch q.state {
-	case Compiling:
-		q.compileSpan.Finish()
-	case Queueing:
-		q.queueSpan.Finish()
-	case Planning:
-		q.planSpan.Finish()
-	case Requeueing:
-		q.requeueSpan.Finish()
-	case Executing:
-		q.executeSpan.Finish()
-	case Errored:
-		// The query has already been finished in the call to setErr.
-		return
-	case Canceled:
-		// The query has already been finished in the call to Cancel.
-		return
-	case Finished:
-		// The query has already finished
-		return
-	default:
-		panic("unreachable, all states have been accounted for")
-	}
-
-	q.parentSpan.Finish()
-	q.c.queryDone <- q
-	close(q.ready)
-}
-
 // Done must always be called to free resources.
 func (q *Query) Done() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	// TODO(jsternberg): I'm pretty sure this can results in releasing resources that are still
+	// actively being used. This method should indicate to the controller that it no longer has to
+	// keep the queries around, but it shouldn't let the client decide the resources are freed since
+	// the query may have been canceled and is still waiting to hit a cancel point.
+	// This could result in reporting the wrong number for resource usage.
+	q.done.Do(func() {
+		q.mu.Lock()
+		if q.state != Errored {
+			q.transitionTo(Finished)
+		}
+		q.mu.Unlock()
 
-	q.finish()
-
-	q.state = Finished
+		// We must send the information that this query is done outside of the lock because
+		// otherwise we can deadlock with the controller.
+		q.c.queryDone <- q
+	})
 }
 
 // Statistics reports the statisitcs for the query.
@@ -490,26 +524,10 @@ func (q *Query) Statistics() flux.Statistics {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	stats := flux.Statistics{}
-	stats.TotalDuration = q.parentSpan.Duration
-	if q.compileSpan != nil {
-		stats.CompileDuration = q.compileSpan.Duration
-	}
-	if q.queueSpan != nil {
-		stats.QueueDuration = q.queueSpan.Duration
-	}
-	if q.planSpan != nil {
-		stats.PlanDuration = q.planSpan.Duration
-	}
-	if q.requeueSpan != nil {
-		stats.RequeueDuration = q.requeueSpan.Duration
-	}
-	if q.executeSpan != nil {
-		stats.ExecuteDuration = q.executeSpan.Duration
-	}
+	stats := q.stats
 	stats.Concurrency = q.concurrency
 	if q.alloc != nil {
-		stats.MaxAllocated = q.alloc.Max()
+		stats.MaxAllocated = q.alloc.MaxAllocated()
 	}
 	return stats
 }
@@ -520,6 +538,89 @@ func (q *Query) State() State {
 	s := q.state
 	q.mu.Unlock()
 	return s
+}
+
+// transitionTo will transition from one state to another. If a list of current states
+// is given, then the query must be in one of those states for the transition to succeed.
+// This method must be called with a lock and it must not transition to a final state
+// from within the run loop.
+func (q *Query) transitionTo(newState State, currentState ...State) bool {
+	if len(currentState) > 0 {
+		// Find the current state in the list of current states.
+		for _, st := range currentState {
+			if q.state == st {
+				goto TRANSITION
+			}
+		}
+		return false
+	}
+
+TRANSITION:
+	// We are transitioning to a new state. Close the current span (if it exists).
+	if q.currentSpan != nil {
+		q.currentSpan.Finish()
+		switch q.state {
+		case Compiling:
+			q.stats.CompileDuration += q.currentSpan.Duration
+		case Queueing:
+			q.stats.QueueDuration += q.currentSpan.Duration
+		case Planning:
+			q.stats.PlanDuration += q.currentSpan.Duration
+		case Requeueing:
+			q.stats.RequeueDuration += q.currentSpan.Duration
+		case Executing:
+			q.stats.ExecuteDuration += q.currentSpan.Duration
+		}
+	}
+	q.currentSpan, q.currentCtx = nil, nil
+
+	// If we are transitioning to a finished state from a non-finished state, finish the parent span.
+	switch newState {
+	case Errored, Canceled, Finished:
+		if q.parentSpan != nil {
+			q.parentSpan.Finish()
+			q.stats.TotalDuration = q.parentSpan.Duration
+			q.parentSpan = nil
+
+			// Close the ready channel on the first time we move to one of these states.
+			// It should signal any queries waiting on the results that no results will come.
+			// Signal to the main loop that this query has completed.
+			close(q.ready)
+		}
+	}
+
+	// Transition to the new state.
+	q.state = newState
+
+	// Start a new span and set a new context.
+	var (
+		dur         *prometheus.HistogramVec
+		gauge       *prometheus.GaugeVec
+		labelValues = q.labelValues
+	)
+	switch newState {
+	case Compiling:
+		dur, gauge = q.c.metrics.compilingDur, q.c.metrics.compiling
+		labelValues = q.compileLabelValues
+	case Queueing:
+		dur, gauge = q.c.metrics.queueingDur, q.c.metrics.queueing
+	case Planning:
+		dur, gauge = q.c.metrics.planningDur, q.c.metrics.planning
+	case Requeueing:
+		dur, gauge = q.c.metrics.requeueingDur, q.c.metrics.requeueing
+	case Executing:
+		dur, gauge = q.c.metrics.executingDur, q.c.metrics.executing
+	default:
+		// This state is not tracked so do not create a new span or context for it.
+		return true
+	}
+	q.currentSpan, q.currentCtx = StartSpanFromContext(
+		q.parentCtx,
+		newState.String(),
+		dur.WithLabelValues(labelValues...),
+		gauge.WithLabelValues(labelValues...),
+	)
+	return true
 }
 
 func (q *Query) isOK() bool {
@@ -541,12 +642,7 @@ func (q *Query) setErr(err error) {
 	defer q.mu.Unlock()
 	q.err = err
 
-	// Finish the query immediately.
-	// This allows for receiving from the Ready channel in the same goroutine
-	// that has called defer q.Done()
-	q.finish()
-
-	q.state = Errored
+	q.transitionTo(Errored)
 }
 
 func (q *Query) setResults(r map[string]flux.Result) {
@@ -562,104 +658,43 @@ func (q *Query) tryCompile() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.state == Created {
-		q.compileSpan, q.compilingCtx = StartSpanFromContext(
-			q.parentCtx,
-			"compiling",
-			q.c.metrics.compilingDur.WithLabelValues(q.compileLabelValues...),
-			q.c.metrics.compiling.WithLabelValues(q.compileLabelValues...),
-		)
-
-		q.state = Compiling
-		return true
-	}
-	return false
+	return q.transitionTo(Compiling, Created)
 }
 
 // tryQueue attempts to transition the query into the Queueing state.
 func (q *Query) tryQueue() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.state == Compiling || q.state == Created {
-		if q.state == Compiling {
-			q.compileSpan.Finish()
-		}
-		q.queueSpan, q.queueCtx = StartSpanFromContext(
-			q.parentCtx,
-			"queueing",
-			q.c.metrics.queueingDur.WithLabelValues(q.labelValues...),
-			q.c.metrics.queueing.WithLabelValues(q.labelValues...),
-		)
 
-		q.state = Queueing
-		return true
-	}
-	return false
+	return q.transitionTo(Queueing, Compiling)
 }
 
 // tryRequeue attempts to transition the query into the Requeueing state.
 func (q *Query) tryRequeue() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.state == Planning {
-		q.planSpan.Finish()
 
-		q.requeueSpan, q.requeueCtx = StartSpanFromContext(
-			q.parentCtx,
-			"requeueing",
-			q.c.metrics.requeueingDur.WithLabelValues(q.labelValues...),
-			q.c.metrics.requeueing.WithLabelValues(q.labelValues...),
-		)
-
-		q.state = Requeueing
+	if q.state == Requeueing {
+		// Already in the correct state.
 		return true
 	}
-	return false
+	return q.transitionTo(Requeueing, Planning)
 }
 
 // tryPlan attempts to transition the query into the Planning state.
 func (q *Query) tryPlan() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.state == Queueing {
-		q.queueSpan.Finish()
 
-		q.planSpan, q.planCtx = StartSpanFromContext(
-			q.parentCtx,
-			"planning",
-			q.c.metrics.planningDur.WithLabelValues(q.labelValues...),
-			q.c.metrics.planning.WithLabelValues(q.labelValues...),
-		)
-
-		q.state = Planning
-		return true
-	}
-	return false
+	return q.transitionTo(Planning, Queueing)
 }
 
 // tryExec attempts to transition the query into the Executing state.
 func (q *Query) tryExec() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.state == Requeueing || q.state == Planning {
-		switch q.state {
-		case Requeueing:
-			q.requeueSpan.Finish()
-		case Planning:
-			q.planSpan.Finish()
-		}
 
-		q.executeSpan, q.executeCtx = StartSpanFromContext(
-			q.parentCtx,
-			"executing",
-			q.c.metrics.executingDur.WithLabelValues(q.labelValues...),
-			q.c.metrics.executing.WithLabelValues(q.labelValues...),
-		)
-
-		q.state = Executing
-		return true
-	}
-	return false
+	return q.transitionTo(Executing, Requeueing, Planning)
 }
 
 // State is the query state.
@@ -688,7 +723,7 @@ func (s State) String() string {
 	case Planning:
 		return "planning"
 	case Requeueing:
-		return "requeing"
+		return "requeueing"
 	case Executing:
 		return "executing"
 	case Errored:

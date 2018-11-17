@@ -103,7 +103,7 @@ The following keywords are reserved and may not be used as identifiers:
 
 The following character sequences represent operators:
 
-    +   ==   !=   (   )
+    +   ==   !=   (   )   =>
     -   <    !~   [   ]
     *   >    =~   {   }
     /   <=   =    ,   :
@@ -229,7 +229,7 @@ Examples:
     2018-01-01T00:00:00Z + 1mo30d   // 2018-03-02T00:00:00Z, Months are applied first to get February 1st, then days are added resulting in March 2 in 2018.
     2018-01-31T00:00:00Z + 1mo1d    // 2018-03-01T00:00:00Z, Months are applied first to get February 28th, then days are added resulting in March 1 in 2018.
 
-[IMPL#253](https://github.com/influxdata/platform/issues/253) Parse duration literals
+[IMPL#657](https://github.com/influxdata/platform/issues/657) Implement Duration vectors
 
 #### Date and time literals
 
@@ -257,6 +257,8 @@ Examples:
     2018-08-15T13:36:23-07:00
     2009-10-15T09:00:00       // October 15th 2009 at 9 AM in the default location
     2018-01-01                // midnight on January 1st 2018 in the default location
+
+[IMPL#152](https://github.com/influxdata/flux/issues/152) Implement shorthand time literals
 
 #### String literals
 
@@ -330,7 +332,8 @@ Regular expression literals support only the following escape sequences:
     \\   U+005c backslash
 
 
-    regexp_lit         = "/" { unicode_char | byte_value | regexp_escape_char } "/" .
+    regexp_lit         = "/" regexp_char { regexp_char } "/" .
+    regexp_char        = unicode_char | byte_value | regexp_escape_char .
     regexp_escape_char = `\` (`/` | `\`)
 
 Examples:
@@ -340,11 +343,10 @@ Examples:
     /^\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e(ZZ)?$/
     /^日本語(ZZ)?$/ // the above two lines are equivalent
     /\\xZZ/ // this becomes the literal pattern "\xZZ"
+    /a\/b\\c\d/ // escape sequences and character class shortcuts are supported
+    /(?:)/ // the empty regular expression
 
 The regular expression syntax is defined by [RE2](https://github.com/google/re2/wiki/Syntax).
-
-
-[IMPL#250](https://github.com/influxdata/platform/issues/250) Parse regular expression literals
 
 ### Variables
 
@@ -353,11 +355,10 @@ A variable can only hold values defined by its type.
 
 ### Types
 
-A type defines the set of values and operations on those values.
+A type defines a set of values and operations on those values.
 Types are never explicitly declared as part of the syntax.
 Types are always inferred from the usage of the value.
-
-[IMPL#249](https://github.com/influxdata/platform/issues/249) Specify type inference rules
+Type inference follows a Hindley-Milner style inference system.
 
 #### Boolean types
 
@@ -430,7 +431,45 @@ A _function type_ represents a set of all functions with the same argument and r
 A _generator type_ represents a value that produces an unknown number of other values.
 The generated values may be of any other type but must all be the same type.
 
-[IMPL#XXX](https://github.com/influxdata/platform/query/issues/XXX) Implement generators
+[IMPL#658](https://github.com/influxdata/platform/query/issues/658) Implement Generators types
+
+##### Polymorphism
+
+Flux types can be polymorphic, meaning that a type may take on many different types.
+Flux supports let-polymorphism and structural polymorphism.
+
+Let-polymorphism is the concept that each time an identifier is referenced is may take on a different type.
+For example:
+
+    add = (a,b) => a + b
+    add(a:1,b:2) // 3
+    add(a:1.5,b:2.0) // 3.5
+
+The identifiers `a` and `b` in the body of the `add` function are used as both `int` and `float` types.
+This is let-polymorphism, each different use of an identifier may have a different type.
+
+Structural polymorphism is the concept that structures (objects in Flux) can be used by the same function even if the structures themselves are different.
+For example:
+
+    john = {name:"John", lastName:"Smith"}
+    jane = {name:"Jane", age:44}
+
+    // John and Jane are objects with different types.
+    // We can still define a function that can operate on both objects safely.
+
+    // name returns the name of a person
+    name = (person) => person.name
+
+    name(person:john) // John
+    name(person:jane) // Jane
+
+    device = {id: 125325, lat: 15.6163, lon: 62.6623}
+
+    name(person:device) // Type error, "device" does not have a property name.
+
+This is structural polymorphism, objects of differing types can be used as the same type so long as they both contain the necessary properties. The necessary properties are determined by the use of the object.
+
+This form of polymorphism means that these checks are performed during type inference and not during runtime. Type errors are found and reported before runtime.
 
 ### Blocks
 
@@ -595,6 +634,8 @@ Package names must be valid Flux identifiers.
 The package statement must be the first statement of every Flux source file.
 If a file does not declare a package statement, all identifiers in that file will belong to the special _main_ package.
 
+[IMPL#247](https://github.com/influxdata/platform/issues/247) Add package/namespace support
+
 ##### package main
 
 The _main_ package is special for a few reasons:
@@ -688,6 +729,8 @@ The default value is set using the time zone of the running process.
 
     option location = fixedZone(offset:-5h) // set timezone to be 5 hours west of UTC
     option location = loadLocation(name:"America/Denver") // set location to be America/Denver
+
+[IMPL#660](https://github.com/influxdata/platform/issues/660) Implement Location option
 
 #### Return statements
 
@@ -828,6 +871,9 @@ Friday    = 5
 Saturday  = 6
 ```
 
+
+[IMPL#153](https://github.com/influxdata/flux/issues/153) Add Days of the Week constants
+
 ###### Months of the year
 
 Months are represented as integers in the range `[1-12]`.
@@ -848,6 +894,8 @@ November  = 11
 December  = 12
 ```
 
+[IMPL#154](https://github.com/influxdata/flux/issues/154) Add Months of the Year constants
+
 ##### Time and date functions
 
 These are builtin functions that all take a single `time` argument and return an integer.
@@ -867,12 +915,12 @@ These are builtin functions that all take a single `time` argument and return an
 * `month` - integer
     Month returns the month of the year for the provided time in the range `[1-12]`.
 
+[IMPL#155](https://github.com/influxdata/flux/issues/155) Implement Time and date functions 
+
 ##### System Time
 
 The builtin function `systemTime` returns the current system time.
 All calls to `systemTime` within a single evaluation of a Flux script return the same time.
-
-[IMPL#XXX](https://github.com/influxdata/platform/query/issues/XXX) Make systemTime consistent for a single evaluation.
 
 #### Intervals
 
@@ -973,7 +1021,7 @@ Examples using known start and stop dates:
     // [2018-04-15, 2018-05-15)
 
 
-[IMPL#XXX](https://github.com/influxdata/platform/query/issues/XXX) Implement intervals function
+[IMPL#659](https://github.com/influxdata/platform/query/issues/659) Implement intervals function
 
 
 ##### Builtin Intervals
@@ -1019,6 +1067,9 @@ Examples:
     fixedZone(offset:-5h) // time zone 5 hours west of UTC
     fixedZone(offset:4h30m) // time zone 4 and a half hours east of UTC
 
+
+[IMPL#156](https://github.com/influxdata/flux/issues/156) Implement FixedZone function
+
 #### LoadLocation
 
 LoadLoacation loads a locations from a time zone database.
@@ -1034,6 +1085,8 @@ Examples:
     loadLocation(name:"America/Denver")
     loadLocation(name:"America/Chicago")
     loadLocation(name:"Africa/Tunis")
+
+[IMPL#157](https://github.com/influxdata/flux/issues/157) Implement LoadLoacation function
 
 ## Query engine
 
@@ -1198,6 +1251,22 @@ Example:
     from(bucket:"telegraf/autogen")
     from(bucketID:"0261d8287f4d6000")
 
+#### Buckets
+
+Buckets is a type of data source that retrieves a list of buckets that the caller is authorized to access.  
+It takes no input parameters and produces an output table with the following columns: 
+
+* name (string): the name of the bucket
+* id (string): the internal ID of the bucket
+* organization (string): the organization this bucket belongs to
+* organizationID (string): the internal ID of the organization
+* retentionPolicy (string): the name of the retention policy, if present
+* retentionPeriod (duration): the duration of time for which data is held in this bucket
+
+Example: 
+
+    buckets() |> filter(fn: (r) => r.organization == "my-org") 
+
 #### Yield
 
 Yield indicates that the stream received by the yield operation should be delivered as a result of the query.
@@ -1225,24 +1294,48 @@ Any output table will have the following properties:
 
 * It always contains a single record.
 * It will have the same group key as the input table.
-* It will have a column `_time` which represents the time of the aggregated record.
-    This can be set as the start or stop time of the input table.
-    By default the stop time is used.
 * It will contain a column for each provided aggregate column.
     The column label will be the same as the input table.
     The type of the column depends on the specific aggregate operation.
+* It will not have a _time column
 
 All aggregate operations have the following properties:
 
 * `columns` list of string
     columns specifies a list of columns to aggregate.
+
+##### AggregateWindow
+
+AggregateWindow is a function that simplifies aggregating data over fixed windows of time.
+AggregateWindow windows the data, performs an aggregate operation, and then undoes the windowing to produce
+an output table for every input table.
+
+AggregateWindow has the following properties:
+
+
+* `every` duration
+    Every specifies the window size to aggregate.
+* `fn` aggregate function
+    Fn specifies the aggregate operation to perform. Any of the functions in this Aggregate section can be provided.
+* `columns` list of string
+    Columns specifies a list of columns to aggregate.
+    Defaults to ["_value"]
 * `timeSrc` string
-    timeSrc is the source time column to use on the resulting aggregate record.
-    The value must be column with type `time` and must be part of the group key.
-    Defaults to `_stop`.
+    TimeSrc is the name of a column from the group key to use as the source for the aggregated time.
+    Defaults to "_stop".
 * `timeDst` string
-    timeDst is the destination column to use for the resulting aggregate record.
-    Defaults to `_time`.
+    TimeDst is the name of a new column in which the aggregated time is placed.
+    Defaults to "_time".
+
+Example:
+
+```
+// Compute the mean over 1m intervals for the last 1h.
+from(bucket: "telegraf/autogen")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "cpu" and r._field == "usage_system")
+  |> aggregateWindow(every: 1m, fn:mean)
+```
 
 ##### Covariance
 
@@ -1251,6 +1344,8 @@ Covariance computes the covariance between two columns.
 
 Covariance has the following properties:
 
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
 * `pearsonr` bool
     pearsonr indicates whether the result should be normalized to be the Pearson R coefficient.
 * `valueDst` string
@@ -1267,28 +1362,13 @@ Example:
 Count is an aggregate operation.
 For each aggregated column, it outputs the number of non null records as an integer.
 
+Count has the following property: 
+
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
+
 Example:
 `from(bucket: "telegraf/autogen") |> range(start: -5m) |> count()`
-
-#### Duplicate 
-Duplicate will duplicate a specified column in a table
-
-Duplicate has the following properties:
-
-* `column` string
-	The column to duplicate
-* `as` string
-	The name that should be assigned to the duplicate column
-
-Example usage:
-
-Duplicate column `server` under the name `host`:
-```
-from(bucket: "telegraf/autogen")
-	|> range(start:-5m)
-	|> filter(fn: (r) => r._measurement == "cpu")
-	|> duplicate(column: "host", as: "server")
-```
 
 ##### Integral
 
@@ -1298,8 +1378,13 @@ The curve is defined as function where the domain is the record times and the ra
 
 Integral has the following properties:
 
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
 * `unit` duration
     unit is the time duration to use when computing the integral
+* `timeColumn` string
+    timeColumn is the name of the column containing the time value.
+    Defaults to `_time`.
 
 Example: 
 
@@ -1315,6 +1400,11 @@ from(bucket: "telegraf/autogen")
 Mean is an aggregate operation.
 For each aggregated column, it outputs the mean of the non null records as a float.
 
+Mean has the following property: 
+
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
+
 Example: 
 ```
 from(bucket:"telegraf/autogen")
@@ -1325,19 +1415,42 @@ from(bucket:"telegraf/autogen")
     |> mean()
 ```
 
-##### Percentile
+##### Median (aggregate)
 
-Percentile is an aggregate operation.
-For each aggregated column, it outputs the value that represents the specified percentile of the non null record as a float.
+Median is defined as:
+
+    median = (method="estimate_tdigest", compression=0.0, tables=<-) =>
+    	tables
+    		|> percentile(percentile:0.5, method:method, compression:compression)
+
+Is it simply a `percentile` with the `percentile` paramter always set to `0.5`.
+It therefore shares all the same properties as the percentile function.
+
+Example:
+```
+// Determine median cpu system usage:
+from(bucket: "telegraf/autogen")
+	|> range(start: -5m)
+	|> filter(fn: (r) => r._measurement == "cpu" and r._field == "usage_system")
+	|> median()
+```
+
+##### Percentile (aggregate)
+
+Percentile is both an aggregate operation and a selector operation depending on selected options.
+In the aggregate methods, it outputs the value that represents the specified percentile of the non null record as a float.
 
 Percentile has the following properties:
 
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
 * `percentile` float
     A value between 0 and 1 indicating the desired percentile.
-* `exact` bool
-    If true an exact answer is computed, otherwise an approximate answer is computed.
-    Using exact requires that the entire dataset fit in available memory.
-    Defaults to false.
+* `method` string
+    percentile provides 3 methods for computation: 
+    * `estimate_tdigest`: an aggregate result that uses a tdigest data structure to compute an accurate percentile estimate on large data sources. 
+    * `exact_mean`: an aggregate result that takes the average of the two points closest to the percentile value. 
+    * `exact_selector`: see Percentile (selector) 
 * `compression` float
    Compression indicates how many centroids to use when compressing the dataset.
    A larger number produces a more accurate result at the cost of increased memory requirements.
@@ -1349,13 +1462,18 @@ Example:
 from(bucket: "telegraf/autogen")
 	|> range(start: -5m)
 	|> filter(fn: (r) => r._measurement == "cpu" and r._field == "usage_system")
-	|> percentile(p: 0.99)
+	|> percentile(percentile: 0.99, method: "estimate_tdigest", compression: 1000)
 ```
 
 ##### Skew
 
 Skew is an aggregate operation.
 For each aggregated column, it outputs the skew of the non null record as a float.
+
+Skew has the following parameter: 
+
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
 
 Example:
 ```
@@ -1372,6 +1490,11 @@ For each aggregated column, it outputs the difference between the min and max va
 The type of the output column depends on the type of input column: for input columns with type `uint` or `int`, the output is an `int`; for `float` input columns the output is a `float`.
 All other input types are invalid.
 
+Spread has the following parameter: 
+
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
+
 Example:
 ```
 from(bucket: "telegraf/autogen") 
@@ -1383,6 +1506,11 @@ from(bucket: "telegraf/autogen")
 
 Stddev is an aggregate operation.
 For each aggregated column, it outputs the standard deviation of the non null record as a float.
+
+Stddev has the following parameter: 
+
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
 
 Example:
 ```
@@ -1398,6 +1526,11 @@ Stddev is an aggregate operation.
 For each aggregated column, it outputs the sum of the non null record.
 The output column type is the same as the input column type.
 
+Sum has the following parameter: 
+
+* `columns` list of string
+    columns specifies a list of columns to aggregate. Defaults to `["_value"]`
+
 Example:
 ```
 from(bucket: "telegraf/autogen") 
@@ -1408,8 +1541,9 @@ from(bucket: "telegraf/autogen")
 
 #### Multiple aggregates
 
-TODO(nathanielc): Need a way to apply multiple aggregates to same table
+Multiple aggregates can be applied to the same table using the `aggregate` function.
 
+[IMPL#139](https://github.com/influxdata/platform/issues/139) Add aggregate function
 
 #### Selector operations
 
@@ -1472,6 +1606,54 @@ from(bucket:"telegraf/autogen")
     |> min()
 ```
 
+##### Percentile (selector)
+
+Percentile is both an aggregate operation and a selector operation depending on selected options.
+In the aggregate methods, it outputs the value that represents the specified percentile of the non null record as a float.
+
+Percentile has the following properties:
+
+* `column` string
+    column indicates which column will be used for the percentile computation. Defaults to `"_value"`
+* `percentile` float
+    A value between 0 and 1 indicating the desired percentile.
+* `method` string
+    percentile provides 3 methods for computation: 
+    * `estimate_tdigest`: See Percentile (Aggregate) 
+    * `exact_mean`: See Percentile (Aggregate) 
+    * `exact_selector`: a selector result that returns the data point for which at least `percentile` points are less than. 
+
+Example:
+```
+// Determine 99th percentile cpu system usage:
+from(bucket: "telegraf/autogen")
+	|> range(start: -5m)
+	|> filter(fn: (r) => r._measurement == "cpu" and r._field == "usage_system")
+	|> percentile(percentile: 0.99, method: "exact_selector")
+```
+
+##### Median (selector)
+
+Median is defined as:
+
+    median = (method="estimate_tdigest", compression=0.0, tables=<-) =>
+    	tables
+    		|> percentile(percentile:0.5, method:method, compression:compression)
+
+Is it simply a `percentile` with the `percentile` paramter always set to `0.5`.
+It therefore shares all the same properties as the percentile function.
+
+Example:
+```
+// Determine median cpu system usage:
+from(bucket: "telegraf/autogen")
+	|> range(start: -5m)
+	|> filter(fn: (r) => r._measurement == "cpu" and r._field == "usage_system")
+	|> median(method: "exact_selector")
+```
+
+
+
 ##### Sample
 
 Sample is a selector operation.
@@ -1525,9 +1707,9 @@ from(bucket:"telegraf/autogen")
 
 #### Histogram
 
-Histogram approximates the cumulative distribution function of a dataset by counting data frequencies for a list of buckets.
-A bucket is defined by an upper bound where all data points that are less than or equal to the bound are counted in the bucket.
-The bucket counts are cumulative.
+Histogram approximates the cumulative distribution function of a dataset by counting data frequencies for a list of bins.
+A bin is defined by an upper bound where all data points that are less than or equal to the bound are counted in the bin.
+The bin counts are cumulative.
 
 Each input table is converted into a single output table representing a single histogram.
 The output table will have a the same group key as the input table.
@@ -1545,9 +1727,9 @@ Histogram has the following properties:
 * `countColumn` string
     CountColumn is the name of the column in which to store the histogram counts.
     Defaults to `_value`.
-* `buckets` array of floats
-    Buckets is a list of upper bounds to use when computing the histogram frequencies.
-    Buckets should contain a bucket whose bound is the maximum value of the data set, this value can be set to positive infinity if no maximum is known.
+* `bins` array of floats
+    Bins is a list of upper bounds to use when computing the histogram frequencies.
+    Each element in the array should contain a float value that represents the maximum value for a bin.
 * `normalize` bool
     Normalize when true will convert the counts into frequencies values between 0 and 1.
     Normalized histograms cannot be aggregated by summing their counts.
@@ -1556,7 +1738,7 @@ Histogram has the following properties:
 
 Example:
 
-    histogram(buckets:linearBuckets(start:0.0,width:10.0,count:10))  // compute the histogram of the data using 10 buckets from 0,10,20,...,100
+    histogram(bins:linearBins(start:0.0,width:10.0,count:10))  // compute the histogram of the data using 10 bins from 0,10,20,...,100
 
 #### HistogramQuantile
 
@@ -1601,36 +1783,36 @@ Example:
 
     histogramQuantile(quantile:0.9)  // compute the 90th quantile using histogram data.
 
-#### LinearBuckets
+#### LinearBins
 
-LinearBuckets produces a list of linearly separated floats.
+LinearBins produces a list of linearly separated floats.
 
-LinearBuckets has the following properties:
+LinearBins has the following properties:
 
 * `start` float
     Start is the first value in the returned list.
 * `width` float
-    Width is the distance between subsequent bucket values.
+    Width is the distance between subsequent bin values.
 * `count` int
-    Count is the number of buckets to create.
+    Count is the number of bins to create.
 * `inifinity` bool
-    Infinity when true adds an additional bucket with a value of positive infinity.
+    Infinity when true adds an additional bin with a value of positive infinity.
     Defaults to `true`.
 
-#### LogrithmicBuckets
+#### LogarithmicBins
 
-LogrithmicBuckets produces a list of exponentially separated floats.
+LogarithmicBins produces a list of exponentially separated floats.
 
-LogrithmicBuckets has the following properties:
+LogarithmicBins has the following properties:
 
 * `start` float
-    Start is the first value in the returned bucket list.
+    Start is the first value in the returned bin list.
 * `factor` float
-    Factor is the multiplier applied to each subsequent bucket.
+    Factor is the multiplier applied to each subsequent bin.
 * `count` int
-    Count is the number of buckets to create.
+    Count is the number of bins to create.
 * `inifinity` bool
-    Infinity when true adds an additional bucket with a value of positive infinity.
+    Infinity when true adds an additional bin with a value of positive infinity.
     Defaults to `true`.
 
 #### Limit
@@ -1705,6 +1887,15 @@ Range has the following properties:
 * `stop` duration or timestamp
     Specifies the exclusive newest time to be included in the results.
     Defaults to the value of the `now` option time.
+* `timeColumn` string
+    Name of the time column to use.
+    Defaults to `_time`.
+* `startColumn` string
+    Name of the column containing the start time.
+    Defaults to `_start`.
+* `stopColumn` string
+    Name of the column containing the stop time.
+    Defaults to `_stop`.
 
 Example:
 ```
@@ -1731,7 +1922,7 @@ Rename has the following properties:
 * `columns` object
 	A map of columns to rename and their corresponding new names. Cannot be used with `fn`. 
 * `fn` function 
-    A function which takes a single string parameter (the old column name) and returns a string representing 
+    A function which takes a single string parameter `column` (the old column name) and returns a string representing 
     the new column name. Cannot be used with `columns`.
 
 Example usage:
@@ -1746,7 +1937,7 @@ Rename all columns using `fn` parameter:
 ```
 from(bucket: "telegraf/autogen")
     |> range(start: -5m)
-    |> rename(fn: (col) => "{col}_new")
+    |> rename(fn: (column) => "{column}_new")
 ```
 
 #### Drop 
@@ -1759,7 +1950,7 @@ Drop has the following properties:
 * `columns` array of strings 
     An array of columns which should be excluded from the resulting table. Cannot be used with `fn`.
 * `fn` function 
-    A function which takes a column name as a parameter and returns a boolean indicating whether
+    A function which takes a column name as a parameter `column` and returns a boolean indicating whether
     or not the column should be excluded from the resulting table. Cannot be used with `columns`.  
 
 Example Usage:
@@ -1774,7 +1965,7 @@ Drop columns matching a predicate:
 ```
 from(bucket: "telegraf/autogen")
     |> range(start: -5m)
-    |> drop(fn: (col) => col =~ /usage*/)
+    |> drop(fn: (column) => column =~ /usage*/)
 ```
 
 #### Keep 
@@ -1787,14 +1978,14 @@ Keep has the following properties:
 * `columns` array of strings
     An array of columns that should be included in the resulting table. Cannot be used with `fn`.
 * `fn` function
-    A function which takes a column name as a parameter and returns a boolean indicating whether or not
+    A function which takes a column name as a parameter `column` and returns a boolean indicating whether or not
     the column should be included in the resulting table. Cannot be used with `columns`. 
 
 Example Usage:
 
 Keep a list of columns: `keep(columns: ["_time", "_value"])`
 
-Keep all columns matching a predicate: `keep(fn: (col) => col =~ /inodes*/)`
+Keep all columns matching a predicate: `keep(fn: (column) => column =~ /inodes*/)`
 
 Keep a list of columns:
 ```
@@ -1806,8 +1997,29 @@ Keep all columns matching a predicate:
 ```
 from(bucket: "telegraf/autogen")
     |> range(start: -5m)
-    |> keep(fn: (col) => col =~ /inodes*/) 
+    |> keep(fn: (column) => column =~ /inodes*/) 
 ```
+
+#### Duplicate 
+Duplicate will duplicate a specified column in a table
+
+Duplicate has the following properties:
+
+* `column` string
+	The column to duplicate
+* `as` string
+	The name that should be assigned to the duplicate column
+
+Example usage:
+
+Duplicate column `server` under the name `host`:
+```
+from(bucket: "telegraf/autogen")
+	|> range(start:-5m)
+	|> filter(fn: (r) => r._measurement == "cpu")
+	|> duplicate(column: "host", as: "server")
+```
+
 
 #### Set
 
@@ -1848,7 +2060,7 @@ from(bucket:"telegraf/autogen")
     |> filter(fn: (r) => r._measurement == "system" AND
                r._field == "uptime")
     |> range(start:-12h)
-    |> sort(cols:["region", "host", "value"])
+    |> sort(columns:["region", "host", "value"])
 ```
 #### Group
 
@@ -1904,19 +2116,19 @@ KeyValues outputs a table with the input table's group key, plus two columns  `_
 (column, value) pairs from the input table.  
 
 KeyValues has the following properties: 
-*  `keyCols` list of strings
+*  `keyColumns` list of strings
    A list of columns from which values are extracted
-*  `fn` schema function that may by used instead of `keyCols` to identify the set of columns.  
+*  `fn` schema function that may by used instead of `keyColumns` to identify the set of columns.  
 
 Additional requirements: 
-*  Only one of `keyCols` or `fn` may be used in a single call.  
+*  Only one of `keyColumns` or `fn` may be used in a single call.  
 *  All columns indicated must be of the same type. 
 
 ```
 from(bucket: "telegraf/autogen")
     |> range(start: -30m)
     |> filter(fn: (r) => r._measurement == "cpu")
-    |> keyValues(keyCols: ["usage_idle", "usage_user"])
+    |> keyValues(keyColumns: ["usage_idle", "usage_user"])
 ```
 
 ```
@@ -1927,12 +2139,12 @@ from(bucket: "telegraf/autogen")
 ```
 
 ```
-filterCols = (fn) => (schema) => schema.columns |> filter(fn:(v) => fn(col:v))
+filterColumns = (fn) => (schema) => schema.columns |> filter(fn:(v) => fn(column:v))
 
 from(bucket: "telegraf/autogen")
     |> range(start: -30m)
     |> filter(fn: (r) => r._measurement == "cpu")
-    |> keyValues(fn: filterCols(fn: (col) => col.label =~ /usage_.*/))
+    |> keyValues(fn: filterColumns(fn: (column) => column.label =~ /usage_.*/))
 ```
 
 
@@ -1963,13 +2175,13 @@ Window has the following properties:
     A set of intervals to be used as the windows.
     One of `every`, `period` or `intervals` must be provided.
     When `intervals` is provided, `every`, `period`, and `offset` must be zero.
-* `timeCol` string
+* `timeColumn` string
     Name of the time column to use.
     Defaults to `_time`.
-* `startCol` string
+* `startColumn` string
     Name of the column containing the window start time.
     Defaults to `_start`.
-* `stopCol` string
+* `stopColumn` string
     Name of the column containing the window stop time.
     Defaults to `_stop`.
 
@@ -1995,16 +2207,16 @@ Pivot has the following properties:
 
 * `rowKey` array of strings
     List of columns used to uniquely identify a row for the output.
-* `colKey` array of strings
+* `columnKey` array of strings
     List of columns used to pivot values onto each row identified by the rowKey. 
-* `valueCol` string
+* `valueColumn` string
     Identifies the single column that contains the value to be moved around the pivot
     
 
-The group key of the resulting table will be the same as the input tables, excluding the columns found in the colKey and valueCol. 
+The group key of the resulting table will be the same as the input tables, excluding the columns found in the columnKey and valueColumn. 
 This is because these columns are not part of the resulting output table.  
 
-Every input row should have a 1:1 mapping to a particular row + column in the output table, determined by its values for the rowKey and colKey.   
+Every input row should have a 1:1 mapping to a particular row + column in the output table, determined by its values for the rowKey and columnKey.   
 In the case where more than one value is identified for the same row+column pair in the output, the last value 
 encountered in the set of table rows is taken as the result.
 
@@ -2014,10 +2226,10 @@ Any columns in the original table that are not referenced in the rowKey or the o
 
 The output is constructed as follows:
 1. A new row is created for each unique value identified in the input by the rowKey parameter.
-2. The initial set of columns for the new row is the row key unioned with the group key, but excluding the columns indicated by the colKey and the valueCol.
+2. The initial set of columns for the new row is the row key unioned with the group key, but excluding the columns indicated by the columnKey and the valueColumn.
 3. A set of value columns are added to the row for each unique value identified in the input by the columnKey parameter. 
-The label is a concatenation of the valueCol string and the colKey values using '_' as a separator. 
-4. For each rowKey, columnKey pair, the appropriate value is determined from the input table by the valueCol. 
+The label is a concatenation of the valueColumn string and the columnKey values using '_' as a separator. 
+4. For each rowKey, columnKey pair, the appropriate value is determined from the input table by the valueColumn. 
 If no value is found, the value is set to `null`.
 
 [IMPL#353](https://github.com/influxdata/platform/issues/353) Null defined in spec but not implemented.  
@@ -2028,7 +2240,7 @@ FromRows is a special application of pivot that will automatically align fields 
 Its definition is: 
 
 ```
-  fromRows = (bucket) => from(bucket:bucket) |> pivot(rowKey:["_time"], colKey: ["_field"], valueCol: "_value")
+  fromRows = (bucket) => from(bucket:bucket) |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
 ```
 
 Example: 
@@ -2042,110 +2254,159 @@ fromRows(bucket:"telegraf/autogen")
 
 Join merges two or more input streams, whose values are equal on a set of common columns, into a single output stream.
 The resulting schema is the union of the input schemas, and the resulting group key is the union of the input group keys.
+**Join** has the following properties:
 
-For example, given the following two streams of data:
+* `tables` object  
+    The map of streams to be joined.  
+* `on` list of strings  
+    The list of columns on which to join.  
+* `method` string  
+    The method of join.  
+    **Default:** `"inner"`  
+    **Possible Values:** `"inner", "cross", "left", "right", "full"`  
+
+Both `tables` and `on` are required parameters.
+The `on` parameter and the `cross` method are mutually exclusive.
+Join currently only supports two input streams.
+
+[IMPL#83](https://github.com/influxdata/flux/issues/83) Add support for joining more than 2 streams  
+[IMPL#84](https://github.com/influxdata/flux/issues/84) Add support for different join types  
+
+Example:
+
+Given the following two streams of data:
 
 * SF_Temperature
 
     | _time | _field | _value |
     | ----- | ------ | ------ |
-    | 0001  | "temp" | 70 |
-    | 0002  | "temp" | 75 |
-    | 0003  | "temp" | 72 |
+    | 0001  | "temp" | 70     |
+    | 0002  | "temp" | 75     |
+    | 0003  | "temp" | 72     |
 
 * NY_Temperature
 
     | _time | _field | _value |
     | ----- | ------ | ------ |
-    | 0001  | "temp" | 55 |
-    | 0002  | "temp" | 56 |
-    | 0003  | "temp" | 55 |
+    | 0001  | "temp" | 55     |
+    | 0002  | "temp" | 56     |
+    | 0003  | "temp" | 55     |
 
-And the following join query: `join(tables: {sf: SF_Temperature, ny: NY_Temperature}, on: ["_time", "_field"])`
+And the following join query:
+
+    join(tables: {sf: SF_Temperature, ny: NY_Temperature}, on: ["_time", "_field"])
 
 The output will be:
 
-| _time | _field | ny__value | sf__value |
+| _time | _field | _value_ny | _value_sf |
 | ----- | ------ |---------- | --------- |
-| 0001  | "temp" | 55 | 70 |
-| 0002  | "temp" | 56 | 75 |
-| 0003  | "temp" | 55 | 72 |
-
-
-##### options
-
-The join operator accepts the following named parameters:
-
-| Name | Type | Required | Default Value | Possible Values |
-| ---- | ---- | -------- | ------- | ------ |
-| tables    | map           | yes   | no default value - must be specified with every call | N/A |
-| on        | string array  | no    | list of columns to join on | N/A |
-| method    | string        | no    | inner | inner, cross, left, right, or outer |
-
-* tables
-
-    Map of tables (or streams) to join together. It is the one required parameter of the join.
-
-* on
-
-    An optional parameter for specifying a list of columns to join on.
-    Defaults to the set of columns that are common to all of the input streams.
-
-* method
-
-    An optional parameter that specifies the type of join to be performed.
-    When not specified, an inner join is performed.
-    The **method** parameter may take on any one of the following values:
-
-    * inner - inner join
-
-    * cross - cross product
-
-    * left - left outer join
-
-    * right - right outer join
-
-    * outer - full outer join
-
-The **on** parameter and the **cross** method are mutually exclusive.
+| 0001  | "temp" | 55        | 70        |
+| 0002  | "temp" | 56        | 75        |
+| 0003  | "temp" | 55        | 72        |
 
 
 ##### output schema
 
 The column schema of the output stream is the union of the input schemas, and the same goes for the output group key.
 Columns that must be renamed due to ambiguity (i.e. columns that occur in more than one input stream) are renamed
-according to the template `<table>_<column>`.
+according to the template `<column>_<table>`.
 
-Examples:
+Example:
 
 * SF_Temperature
-* Group Key {"_field"}
+* Group Key for table `{ _field }`
 
     | _time | _field | _value |
     | ----- | ------ | ------ |
-    | 0001  | "temp" | 70 |
-    | 0002  | "temp" | 75 |
-    | 0003  | "temp" | 72 |
+    | 0001  | "temp" | 70     |
+    | 0002  | "temp" | 75     |
+    | 0003  | "temp" | 72     |
 
 * NY_Temperature
-* Group Key {"_time", "_field"}
+* Group Key for all tables `{ _time, _field }`
 
     | _time | _field | _value |
     | ----- | ------ | ------ |
-    | 0001  | "temp" | 55 |
-    | 0002  | "temp" | 56 |
-    | 0003  | "temp" | 55 |
+    | 0001  | "temp" | 55     |
+
+    | _time | _field | _value |
+    | ----- | ------ | ------ |
+    | 0002  | "temp" | 56     |
+
+    | _time | _field | _value |
+    | ----- | ------ | ------ |
+    | 0003  | "temp" | 55     |
 
 `join(tables: {sf: SF_Temperature, ny: NY_Temperature}, on: ["_time"])` produces:
 
-* Group Key {"_time", "sf__field", "ny__field"}
+* Group Key for all tables `{ _time, _field_ny, _field_sf }`
 
-    | _time | sf__field | sf__value | ny__field | ny__value |
-    | ----- | ------ | ---------- | -------- |--------- |
-    | 0001  | "temp" | 70 | "temp" | 55 |
-    | 0002  | "temp" | 75 | "temp" | 56 |
-    | 0003  | "temp" | 72 | "temp: | 55 |
+    | _time | _field_ny | _field_sf | _value_ny | _value_sf |
+    | ----- | --------- | --------- |---------- | --------- |
+    | 0001  | "temp"    | "temp"    | 55        | 70        |
 
+    | _time | _field_ny | _field_sf | _value_ny | _value_sf |
+    | ----- | --------- | --------- |---------- | --------- |
+    | 0002  | "temp"    | "temp"    | 56        | 75        |
+
+    | _time | _field_ny | _field_sf | _value_ny | _value_sf |
+    | ----- | --------- | --------- |---------- | --------- |
+    | 0003  | "temp"    | "temp"    | 55        | 72        |
+
+#### Union
+
+Union concatenates two or more input streams into a single output stream.  In tables that have identical
+schema and group keys, contents of the tables will be concatenated in the output stream.  The output schemas of 
+the Union operation shall be the union of all input schemas.
+
+Union does not preserve the sort order of the rows within tables. A sort operation may be added if a specific sort order is needed.
+
+Union has the following properties:
+* `tables` a list of streams
+    tables specifies the streams to union together.  There must be at least two streams.
+
+For example, given this stream, `SF_Weather` with group key `"_field"` on both tables:
+
+   |  _time |  _field |  _value |
+   | ----- | ------ | ------ |
+   | 0001  | "temp" | 70 |
+   | 0002  | "temp" | 75 |
+
+   | _time | _field | _value |
+   | ----- | ------ | ------ |
+   | 0001  | "humidity" | 81 |
+   | 0002  | "humidity" | 82 |
+
+And this stream, `NY_Weather`, also with group key `"_field"` on both tables:
+
+   | _time | _field | _value |
+   | ----- | ------ | ------ |
+   | 0001  | "temp" | 55 |
+   | 0002  | "temp" | 56 |
+
+   | _time | _field | _value |
+   | ----- | ------ | ------ |
+   | 0001  | "pressure" | 29.82 |
+   | 0002  | "pressure" | 30.01 |
+
+`union(tables: [SF_Weather, NY_Weather])` produces this stream (whose tables are grouped by `"_field"`):
+
+   | _time | _field | _value |
+   | ----- | ------ | ------ |
+   | 0001  | "temp" | 70 |
+   | 0002  | "temp" | 75 |
+   | 0001  | "temp" | 55 |
+   | 0002  | "temp" | 56 |
+
+   | _time | _field | _value |
+   | ----- | ------ | ------ |
+   | 0001  | "humidity" | 81 |
+   | 0002  | "humidity" | 82 |
+
+   | _time | _field | _value |
+   | ----- | ------ | ------ |
+   | 0001  | "pressure" | 29.82 |
+   | 0002  | "pressure" | 30.01 |
 
 #### Cumulative sum
 
@@ -2178,8 +2439,8 @@ Derivative has the following properties:
     If a value is encountered which is less than the previous value then it is assumed the previous value should have been a zero.
 * `columns` list strings
     columns is a list of columns on which to compute the derivative
-* `timeSrc` string
-    timeSrc is the source column for the time values.
+* `timeColumn` string
+    timeColumn is the column name for the time values.
     Defaults to `_time`.
 
 ```
@@ -2321,7 +2582,7 @@ Convert a value to a bool.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toBool()`
 
-The function `toBool` is defined as `toBool = (table=<-) => table |> map(fn:(r) => bool(v:r._value))`.
+The function `toBool` is defined as `toBool = (tables=<-) => tables |> map(fn:(r) => bool(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `bool` function.
 
 ##### toInt
@@ -2330,7 +2591,7 @@ Convert a value to a int.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toInt()`
 
-The function `toInt` is defined as `toInt = (table=<-) => table |> map(fn:(r) => int(v:r._value))`.
+The function `toInt` is defined as `toInt = (tables=<-) => tables |> map(fn:(r) => int(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `int` function.
 
 ##### toFloat
@@ -2339,7 +2600,7 @@ Convert a value to a float.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toFloat()`
 
-The function `toFloat` is defined as `toFloat = (table=<-) => table |> map(fn:(r) => float(v:r._value))`.
+The function `toFloat` is defined as `toFloat = (tables=<-) => tables |> map(fn:(r) => float(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `float` function.
 
 ##### toDuration
@@ -2348,7 +2609,7 @@ Convert a value to a duration.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toDuration()`
 
-The function `toDuration` is defined as `toDuration = (table=<-) => table |> map(fn:(r) => duration(v:r._value))`.
+The function `toDuration` is defined as `toDuration = (tables=<-) => tables |> map(fn:(r) => duration(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `duration` function.
 
 ##### toString
@@ -2357,7 +2618,7 @@ Convert a value to a string.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toString()`
 
-The function `toString` is defined as `toString = (table=<-) => table |> map(fn:(r) => string(v:r._value))`.
+The function `toString` is defined as `toString = (tables=<-) => tables |> map(fn:(r) => string(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `string` function.
 
 ##### toTime
@@ -2366,7 +2627,7 @@ Convert a value to a time.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toTime()`
 
-The function `toTime` is defined as `toTime = (table=<-) => table |> map(fn:(r) => time(v:r._value))`.
+The function `toTime` is defined as `toTime = (tables=<-) => tables |> map(fn:(r) => time(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `time` function.
 
 ##### toUInt
@@ -2375,7 +2636,7 @@ Convert a value to a uint.
 
 Example: `from(bucket: "telegraf") |> filter(fn:(r) => r._measurement == "mem" and r._field == "used") |> toUInt()`
 
-The function `toUInt` is defined as `toUInt = (table=<-) => table |> map(fn:(r) => uint(v:r._value))`.
+The function `toUInt` is defined as `toUInt = (tables=<-) => tables |> map(fn:(r) => uint(v:r._value))`.
 If you need to convert other columns use the `map` function directly with the `uint` function.
 
 
@@ -2385,13 +2646,6 @@ If you need to convert other columns use the `map` function directly with the `u
 ### Composite data types
 
 A composite data type is a collection of primitive data types that together have a higher meaning.
-
-#### Histogram data type
-
-Histogram is a composite type that represents a discrete cumulative distribution.
-Given a histogram with N buckets there will be N columns with the label `le_X` where `X` is replaced with the upper bucket boundary.
-
-[IMPL#241](https://github.com/influxdata/platform/issues/241) Add support for a histogram composite data type.
 
 ### Triggers
 

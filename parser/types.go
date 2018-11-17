@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"bytes"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,8 +30,8 @@ func toDurationSlice(durations []*singleDurationLiteral) []ast.Duration {
 
 func program(body interface{}, text []byte, pos position) (*ast.Program, error) {
 	return &ast.Program{
-		Body:     body.([]ast.Statement),
 		BaseNode: base(text, pos),
+		Body:     body.([]ast.Statement),
 	}, nil
 }
 
@@ -60,23 +61,25 @@ func optionstmt(id, expr interface{}, text []byte, pos position) (*ast.OptionSta
 	return &ast.OptionStatement{
 		BaseNode: base(text, pos),
 		Declaration: &ast.VariableDeclarator{
-			ID:   id.(*ast.Identifier),
-			Init: expr.(ast.Expression),
+			BaseNode: base(text, pos),
+			ID:       id.(*ast.Identifier),
+			Init:     expr.(ast.Expression),
 		},
 	}, nil
 }
 
 func varstmt(declaration interface{}, text []byte, pos position) (*ast.VariableDeclaration, error) {
 	return &ast.VariableDeclaration{
-		Declarations: []*ast.VariableDeclarator{declaration.(*ast.VariableDeclarator)},
 		BaseNode:     base(text, pos),
+		Declarations: []*ast.VariableDeclarator{declaration.(*ast.VariableDeclarator)},
 	}, nil
 }
 
 func vardecl(id, initializer interface{}, text []byte, pos position) (*ast.VariableDeclarator, error) {
 	return &ast.VariableDeclarator{
-		ID:   id.(*ast.Identifier),
-		Init: initializer.(ast.Expression),
+		BaseNode: base(text, pos),
+		ID:       id.(*ast.Identifier),
+		Init:     initializer.(ast.Expression),
 	}, nil
 }
 
@@ -95,8 +98,7 @@ func returnstmt(argument interface{}, text []byte, pos position) (*ast.ReturnSta
 }
 
 func pipeExprs(head, tail interface{}, text []byte, pos position) (*ast.PipeExpression, error) {
-	var arg ast.Expression
-	arg = head.(ast.Expression)
+	var arg ast.Expression = head.(ast.Expression)
 
 	var pe *ast.PipeExpression
 	for _, t := range toIfaceSlice(tail) {
@@ -117,29 +119,30 @@ func incompletePipeExpr(call interface{}, text []byte, pos position) (*ast.PipeE
 func memberexprs(head, tail interface{}, text []byte, pos position) (ast.Expression, error) {
 	res := head.(ast.Expression)
 	for _, prop := range toIfaceSlice(tail) {
-		res = &ast.MemberExpression{
-			Object:   res,
-			Property: prop.(ast.Expression),
-			BaseNode: base(text, pos),
+		switch expr := prop.(type) {
+		case *ast.MemberExpression:
+			expr.BaseNode = base(text, pos)
+			expr.Object = res
+			res = expr
+		case *ast.IndexExpression:
+			expr.BaseNode = base(text, pos)
+			expr.Array = res
+			res = expr
 		}
 	}
 	return res, nil
 }
 
-func memberexpr(object, property interface{}, text []byte, pos position) (*ast.MemberExpression, error) {
-	m := &ast.MemberExpression{
-		BaseNode: base(text, pos),
-	}
+func memberExprFromIdentifier(p interface{}) (*ast.MemberExpression, error) {
+	return &ast.MemberExpression{Property: p.(*ast.Identifier)}, nil
+}
 
-	if object != nil {
-		m.Object = object.(ast.Expression)
-	}
+func memberExprFromStringLiteral(p interface{}) (*ast.MemberExpression, error) {
+	return &ast.MemberExpression{Property: p.(*ast.StringLiteral)}, nil
+}
 
-	if property != nil {
-		m.Property = property.(*ast.Identifier)
-	}
-
-	return m, nil
+func indexExpr(p interface{}) (*ast.IndexExpression, error) {
+	return &ast.IndexExpression{Index: p.(ast.Expression)}, nil
 }
 
 func callexpr(callee, args interface{}, text []byte, pos position) (*ast.CallExpression, error) {
@@ -165,7 +168,12 @@ func callexprs(head, tail interface{}, text []byte, pos position) (ast.Expressio
 			elem.Callee = expr
 			expr = elem
 		case *ast.MemberExpression:
+			elem.BaseNode = base(text, pos)
 			elem.Object = expr
+			expr = elem
+		case *ast.IndexExpression:
+			elem.BaseNode = base(text, pos)
+			elem.Array = expr
 			expr = elem
 		}
 	}
@@ -387,23 +395,33 @@ func datetime(text []byte, pos position) (*ast.DateTimeLiteral, error) {
 	}, nil
 }
 
-func base(text []byte, pos position) *ast.BaseNode {
-	return &ast.BaseNode{
+func base(text []byte, pos position) ast.BaseNode {
+	lines, idx := countLines(text)
+	col := pos.col
+	if lines > 0 {
+		col = 0
+	}
+	return ast.BaseNode{
 		Loc: &ast.SourceLocation{
 			Start: ast.Position{
 				Line:   pos.line,
 				Column: pos.col,
 			},
 			End: ast.Position{
-				Line:   pos.line,
-				Column: pos.col + len(text),
+				Line:   pos.line + lines,
+				Column: col + len(text) - idx,
 			},
-			Source: source(text),
+			Source: string(text),
 		},
 	}
 }
 
-func source(text []byte) *string {
-	str := string(text)
-	return &str
+func countLines(text []byte) (int, int) {
+	count := 0
+	idx := 0
+	for i := bytes.IndexRune(text, '\n'); i >= 0; i = bytes.IndexRune(text[idx:], '\n') {
+		count++
+		idx += i + 1
+	}
+	return count, idx
 }
