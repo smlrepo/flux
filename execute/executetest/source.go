@@ -43,7 +43,7 @@ func (src *FromProcedureSpec) AddTransformation(t execute.Transformation) {
 }
 
 func (src *FromProcedureSpec) Run(ctx context.Context) {
-	id := execute.DatasetID(uuid.NewV4())
+	id := execute.DatasetID(uuid.Must(uuid.NewV4()))
 	for _, t := range src.ts {
 		var max execute.Time
 		for _, tbl := range src.data {
